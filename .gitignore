@@ -1,0 +1,18 @@
+# Archivos de entorno
+.env
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Carpetas de entorno virtual (si usas uno)
+venv/
+.venv/
+env/
+ENV/
+
+# Archivos de IDE/Editor
+.vscode/
+.idea/
