@@ -39,8 +39,11 @@ ai_client = OpenAI(
 
 asset_mapper = AssetMapper()
 
+# Para tareas rápidas, interactivas o de bajo coste
 FAST_MODEL = "google/gemini-flash-1.5"
-SMART_MODEL = "deepseek/deepseek-chat"
+
+# Para tareas complejas que requieren la máxima calidad y razonamiento
+SMART_MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1:free"
 
 SYSTEM_PROMPTS = {
     "capabilities_overview": """

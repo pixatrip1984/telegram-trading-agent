@@ -38,11 +38,8 @@ ai_client = OpenAI(
 )
 asset_mapper = AssetMapper()
 
-# Para tareas rápidas, interactivas o de bajo coste
-FAST_MODEL = "deepseek/deepseek-r1-0528-qwen3-8b:free"
-
-# Para tareas complejas que requieren la máxima calidad y razonamiento
-SMART_MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1:free"
+FAST_MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1:free"
+SMART_MODEL = "deepseek/deepseek-r1-0528-qwen3-8b:free"
 
 SYSTEM_PROMPTS = {
     "capabilities_overview": """
