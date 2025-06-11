@@ -38,8 +38,8 @@ ai_client = OpenAI(
 )
 asset_mapper = AssetMapper()
 
-FAST_MODEL = "google/gemini-flash-1.5"
-SMART_MODEL = "deepseek/deepseek-chat"
+FAST_MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1:free"
+SMART_MODEL = "deepseek/deepseek-r1-0528-qwen3-8b:free"
 
 SYSTEM_PROMPTS = {
     "capabilities_overview": """

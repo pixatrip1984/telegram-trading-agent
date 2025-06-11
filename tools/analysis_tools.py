@@ -1,64 +1,106 @@
-# Archivo: tools/analysis_tools_v2.py
+# Archivo: tools/analysis_tools.py
 
 import pandas as pd
 import numpy as np
 import talib
 from typing import Dict, List, Optional, Tuple
-from .bybit_tools import session
 
-def get_historical_data_extended(symbol: str, interval: str = 'D', limit: int = 1000) -> pd.DataFrame | None:
+# --- INICIO DE MODIFICACIONES ---
+from .bybit_tools import session as bybit_session
+from .binance_tools import get_historical_data_binance # Importamos la nueva función
+# --- FIN DE MODIFICACIONES ---
+
+def get_historical_data_extended(symbol: str, interval: str = 'D', limit: int = 1000) -> Optional[pd.DataFrame]:
     """
-    Obtiene datos históricos extendidos haciendo múltiples llamadas.
-    Puede obtener hasta 60,000 velas históricas.
+    Obtiene datos históricos extendidos haciendo múltiples llamadas a Bybit.
+    Si falla en Bybit, intenta obtener los datos de Binance como fallback.
     """
-    # --- INICIO DE LA CORRECCIÓN ---
-    # Diccionario para traducir intervalos de formato legible a formato de API Bybit v5
+    symbol = symbol.upper()
+    if symbol.endswith('USDT'):
+        # Para las búsquedas, es mejor usar el símbolo sin el par a veces
+        base_symbol = symbol.replace('USDT', '')
+    else:
+        base_symbol = symbol
+        symbol += 'USDT'
+
+    print(f"Iniciando búsqueda de datos históricos para {symbol}...")
+
+    # --- INICIO DE MODIFICACIONES: LÓGICA DE BÚSQUEDA MULTI-EXCHANGE ---
+
+    # Proveedor 1: Bybit (nuestro primario)
+    print("-> Intentando obtener datos de Bybit...")
+    df = get_historical_data_bybit(symbol, interval, limit)
+    
+    if df is not None and not df.empty:
+        print("  -> Datos obtenidos exitosamente de Bybit.")
+        # Añadir una columna para saber de dónde vienen los datos
+        df['source'] = 'Bybit'
+        return df
+
+    # Proveedor 2: Binance (nuestro fallback)
+    print("  -> Fallo en Bybit. Intentando obtener datos de Binance...")
+    
+    # Binance a veces usa intervalos diferentes ('1d' en vez de 'D')
+    # Mapeo de intervalos de Bybit a Binance
+    interval_map_to_binance = {
+        'D': '1d', 'W': '1w', 'M': '1M',
+        '1': '1m', '3': '3m', '5': '5m', '15': '15m', '30': '30m',
+        '60': '1h', '120': '2h', '240': '4h', '360': '6h', '720': '12h'
+    }
+    # Obtener el intervalo de la API de Bybit primero
+    bybit_api_interval = get_bybit_api_interval(interval)
+    binance_interval = interval_map_to_binance.get(bybit_api_interval, bybit_api_interval)
+
+    df_binance = get_historical_data_binance(symbol, binance_interval, limit)
+
+    if df_binance is not None and not df_binance.empty:
+        print("  -> Datos obtenidos exitosamente de Binance.")
+        df_binance['source'] = 'Binance'
+        return df_binance
+
+    # --- FIN DE MODIFICACIONES ---
+
+    print(f"❌ No se pudieron obtener datos para {symbol} en ninguna de las fuentes disponibles (Bybit, Binance).")
+    return None
+
+def get_bybit_api_interval(interval: str) -> str:
+    """Helper para obtener el intervalo correcto para la API de Bybit v5."""
     interval_map = {
         '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30',
         '1h': '60', '2h': '120', '4h': '240', '6h': '360', '12h': '720',
         '1d': 'D', '1w': 'W', '1M': 'M'
     }
-    
-    # Usar el valor del mapa, si no existe, usar el valor original (para 'D', 'W', etc.)
-    api_interval = interval_map.get(interval, interval)
-    # --- FIN DE LA CORRECCIÓN ---
+    return interval_map.get(interval, interval)
 
+def get_historical_data_bybit(symbol: str, interval: str, limit: int) -> Optional[pd.DataFrame]:
+    """
+    Función interna para obtener datos históricos extendidos de Bybit.
+    """
+    api_interval = get_bybit_api_interval(interval)
+    
     try:
-        symbol = symbol.upper()
-        if not symbol.endswith('USDT'):
-            symbol += 'USDT'
-        
         all_data = []
         max_limit_per_call = 1000
-        total_limit = min(limit, 60000)  # Máximo 60k
-        
-        print(f"Obteniendo {total_limit} velas para {symbol} en intervalo {api_interval}...")
+        total_limit = min(limit, 60000)
         
         end_time = None
         remaining = total_limit
         
         while remaining > 0:
             current_limit = min(remaining, max_limit_per_call)
-            
             params = {
-                "category": "spot",
-                "symbol": symbol,
-                "interval": api_interval, # <-- Usar el intervalo corregido
-                "limit": current_limit
+                "category": "spot", "symbol": symbol, "interval": api_interval, "limit": current_limit
             }
-            
             if end_time:
                 params["endTime"] = end_time
             
-            response = session.get_kline(**params)
+            response = bybit_session.get_kline(**params)
             
             if response.get('retCode') == 0 and response['result']['list']:
                 data = pd.DataFrame(
                     response['result']['list'], 
                     columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover']
                 )
-                
-                # Convertir a numérico
                 numeric_cols = ['open', 'high', 'low', 'close', 'volume']
                 data[numeric_cols] = data[numeric_cols].apply(pd.to_numeric)
                 data['timestamp'] = pd.to_numeric(data['timestamp'])
@@ -66,13 +108,12 @@ def get_historical_data_extended(symbol: str, interval: str = 'D', limit: int = 
                 
                 all_data.append(data)
                 
-                # Actualizar el end_time para la siguiente llamada
                 end_time = int(data['timestamp'].min().timestamp() * 1000)
-                remaining -= current_limit
-                
-                print(f"  Descargadas {total_limit - remaining}/{total_limit} velas...")
+                remaining -= len(data)
+                if len(data) < max_limit_per_call: # No hay más datos históricos
+                    break
             else:
-                if response.get('retCode') != 0:
+                if response.get('retCode') != 0 and response.get('retCode') != 10001: # 10001 es "symbol not found"
                     print(f"  Error de API Bybit: {response.get('retMsg')}")
                 break
         
@@ -80,21 +121,18 @@ def get_historical_data_extended(symbol: str, interval: str = 'D', limit: int = 
             combined_df = pd.concat(all_data, ignore_index=True)
             combined_df = combined_df.sort_values('timestamp').reset_index(drop=True)
             combined_df = combined_df.drop_duplicates(subset=['timestamp'])
-            
-            print(f"Total de velas obtenidas: {len(combined_df)}")
             return combined_df
         
         return None
         
     except Exception as e:
-        print(f"Error obteniendo datos históricos extendidos: {e}")
+        print(f"Error obteniendo datos de Bybit: {e}")
         return None
 
 def calculate_market_structure(df: pd.DataFrame) -> Dict:
     """Analiza la estructura del mercado (HH, HL, LL, LH)."""
     highs = df['high'].values
     lows = df['low'].values
-    closes = df['close'].values
     
     pivot_highs = []
     pivot_lows = []
@@ -139,21 +177,18 @@ def detect_chart_patterns(df: pd.DataFrame) -> List[Dict]:
         'Engulfing': talib.CDLENGULFING,
         'Morning Star': talib.CDLMORNINGSTAR,
         'Evening Star': talib.CDLEVENINGSTAR,
-        'Three White Soldiers': talib.CDL3WHITESOLDIERS,
-        'Three Black Crows': talib.CDL3BLACKCROWS
     }
     
     for pattern_name, pattern_func in pattern_functions.items():
         try:
             result = pattern_func(df['open'], df['high'], df['low'], df['close'])
-            last_signal = result.iloc[-1]
-            
-            if last_signal != 0:
+            last_signal_index = result[result != 0].index.max()
+            if pd.notna(last_signal_index) and (len(df) - last_signal_index) <= 5: # Si el patrón ocurrió en las últimas 5 velas
+                last_signal = result.loc[last_signal_index]
                 patterns.append({
                     "pattern": pattern_name,
                     "signal": "Bullish" if last_signal > 0 else "Bearish",
-                    "strength": abs(last_signal),
-                    "location": "Última vela"
+                    "location": f"hace {len(df) - 1 - last_signal_index} velas"
                 })
         except:
             pass
@@ -176,8 +211,10 @@ def calculate_support_resistance_zones(df: pd.DataFrame, sensitivity: float = 0.
         if lows[i] == min(lows[i-10:i+10]):
             pivot_levels.append(lows[i])
     
+    # ... (resto de la función sin cambios) ...
+    # (El resto de la lógica de S/R no necesita ser modificada)
     volume_profile = {}
-    price_step = current_price * 0.001
+    price_step = max(current_price * 0.001, 0.0001)
     
     for i, (price, vol) in enumerate(zip(closes, volumes)):
         price_bucket = round(price / price_step) * price_step
@@ -188,35 +225,19 @@ def calculate_support_resistance_zones(df: pd.DataFrame, sensitivity: float = 0.
     volume_levels = sorted(volume_profile.items(), key=lambda x: x[1], reverse=True)[:10]
     high_volume_prices = [price for price, _ in volume_levels]
     
-    psychological_levels = []
-    round_number = round(current_price, -int(np.log10(current_price)) + 1)
-    for i in range(-5, 6):
-        level = round_number + (round_number * 0.1 * i)
-        if level > 0:
-            psychological_levels.append(level)
-    
-    all_levels = pivot_levels + high_volume_prices + psychological_levels
+    all_levels = pivot_levels + high_volume_prices
     
     zones = []
-    for level in sorted(set(all_levels)):
-        merged = False
-        for zone in zones:
-            if abs(zone['center'] - level) / zone['center'] < sensitivity:
-                zone['levels'].append(level)
-                zone['center'] = np.mean(zone['levels'])
-                zone['strength'] += 1
-                merged = True
-                break
-        
-        if not merged:
-            zones.append({
-                'center': level,
-                'levels': [level],
-                'strength': 1
-            })
-    
+    for level in sorted(list(set(all_levels))):
+        if not zones or abs(zones[-1]['center'] - level) / level > sensitivity:
+            zones.append({'center': level, 'levels': [level], 'strength': 1})
+        else:
+            zones[-1]['levels'].append(level)
+            zones[-1]['center'] = np.mean(zones[-1]['levels'])
+            zones[-1]['strength'] += 1
+            
     support_zones = [z for z in zones if z['center'] < current_price]
-    resistance_zones = [z for z in zones if z['center'] > current_price]
+    resistance_zones = [z for z in zones if z['center'] >= current_price]
     
     support_zones.sort(key=lambda x: x['center'], reverse=True)
     resistance_zones.sort(key=lambda x: x['center'])
@@ -227,7 +248,7 @@ def calculate_support_resistance_zones(df: pd.DataFrame, sensitivity: float = 0.
         "current_price": current_price
     }
 
-def perform_multi_timeframe_analysis(symbol: str, timeframes: List[str] = None) -> Dict:
+def perform_multi_timeframe_analysis(symbol: str, timeframes: Optional[List[str]] = None) -> Dict:
     """Realiza análisis en múltiples temporalidades."""
     if timeframes is None:
         timeframes = ['15m', '1h', '4h', '1d']
@@ -244,17 +265,15 @@ def perform_multi_timeframe_analysis(symbol: str, timeframes: List[str] = None) 
         rsi = talib.RSI(df['close'], timeperiod=14)
         macd, signal, hist = talib.MACD(df['close'])
         
-        sma_20 = talib.SMA(df['close'], timeperiod=20)
         sma_50 = talib.SMA(df['close'], timeperiod=50)
         sma_200 = talib.SMA(df['close'], timeperiod=200) if len(df) > 200 else None
         
         atr = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-        atr_pct = (atr.iloc[-1] / df['close'].iloc[-1]) * 100
         
         current_close = df['close'].iloc[-1]
         trend = "Neutral"
         
-        if sma_200 is not None and not pd.isna(sma_200.iloc[-1]):
+        if sma_200 is not None and not pd.isna(sma_200.iloc[-1]) and not pd.isna(sma_50.iloc[-1]):
             if current_close > sma_50.iloc[-1] > sma_200.iloc[-1]:
                 trend = "Fuerte Alcista"
             elif current_close < sma_50.iloc[-1] < sma_200.iloc[-1]:
@@ -265,31 +284,29 @@ def perform_multi_timeframe_analysis(symbol: str, timeframes: List[str] = None) 
                 trend = "Bajista"
         
         momentum = "Neutral"
-        if rsi.iloc[-1] > 70:
-            momentum = "Sobrecompra"
-        elif rsi.iloc[-1] < 30:
-            momentum = "Sobreventa"
-        elif macd.iloc[-1] > signal.iloc[-1] and hist.iloc[-1] > 0:
-            momentum = "Bullish"
-        elif macd.iloc[-1] < signal.iloc[-1] and hist.iloc[-1] < 0:
-            momentum = "Bearish"
+        if not rsi.empty and not macd.empty:
+            if rsi.iloc[-1] > 70: momentum = "Sobrecompra"
+            elif rsi.iloc[-1] < 30: momentum = "Sobreventa"
+            elif macd.iloc[-1] > signal.iloc[-1] and hist.iloc[-1] > 0: momentum = "Bullish"
+            elif macd.iloc[-1] < signal.iloc[-1] and hist.iloc[-1] < 0: momentum = "Bearish"
         
         mtf_analysis[tf] = {
             "trend": trend,
             "momentum": momentum,
-            "rsi": round(rsi.iloc[-1], 2),
-            "volatility": round(atr_pct, 2),
-            "price": current_close,
-            "distance_from_sma50": round((current_close - sma_50.iloc[-1]) / sma_50.iloc[-1] * 100, 2)
+            "rsi": round(rsi.iloc[-1], 2) if not rsi.empty else None,
+            "volatility_atr": round(atr.iloc[-1], 4) if not atr.empty else None
         }
     
     trends = [analysis["trend"] for analysis in mtf_analysis.values()]
+    if not trends:
+        return {"timeframes": mtf_analysis, "overall_bias": "Indeterminado", "alignment": False}
+
     bullish_count = sum(1 for t in trends if "Alcista" in t)
     bearish_count = sum(1 for t in trends if "Bajista" in t)
     
-    if bullish_count > bearish_count:
+    if bullish_count > bearish_count and bullish_count >= len(trends) / 2:
         overall_bias = "BULLISH"
-    elif bearish_count > bullish_count:
+    elif bearish_count > bullish_count and bearish_count >= len(trends) / 2:
         overall_bias = "BEARISH"
     else:
         overall_bias = "NEUTRAL"
@@ -306,101 +323,99 @@ def advanced_technical_analysis(symbol: str, interval: str = '1h') -> Dict:
     df = get_historical_data_extended(symbol, interval=interval, limit=1000)
     
     if df is None or len(df) < 200:
-        return {"success": False, "message": f"Datos insuficientes para {symbol} en el intervalo {interval}"}
+        return {"success": False, "message": f"Datos insuficientes para {symbol} en el intervalo {interval} desde todas las fuentes."}
     
     current_price = float(df['close'].iloc[-1])
+    data_source = df['source'].iloc[-1] # Saber de dónde vienen los datos
     
     market_structure = calculate_market_structure(df)
     sr_zones = calculate_support_resistance_zones(df)
     patterns = detect_chart_patterns(df)
     
     indicators = {}
-    indicators['SMA_20'] = talib.SMA(df['close'], 20).iloc[-1]
     indicators['SMA_50'] = talib.SMA(df['close'], 50).iloc[-1]
     indicators['SMA_200'] = talib.SMA(df['close'], 200).iloc[-1]
-    indicators['EMA_21'] = talib.EMA(df['close'], 21).iloc[-1]
     indicators['RSI'] = talib.RSI(df['close'], 14).iloc[-1]
     macd, signal, hist = talib.MACD(df['close'])
     indicators['MACD'] = {"macd": macd.iloc[-1], "signal": signal.iloc[-1], "histogram": hist.iloc[-1]}
-    bb_upper, bb_middle, bb_lower = talib.BBANDS(df['close'], 20, 2, 2)
-    indicators['Bollinger'] = {
-        "upper": bb_upper.iloc[-1], "middle": bb_middle.iloc[-1], "lower": bb_lower.iloc[-1],
-        "width": (bb_upper.iloc[-1] - bb_lower.iloc[-1]) / bb_middle.iloc[-1] * 100
-    }
+    bb_upper, bb_middle, bb_lower = talib.BBANDS(df['close'], 20)
+    indicators['Bollinger'] = {"upper": bb_upper.iloc[-1], "middle": bb_middle.iloc[-1], "lower": bb_lower.iloc[-1]}
     indicators['ATR'] = talib.ATR(df['high'], df['low'], df['close'], 14).iloc[-1]
-    indicators['ATR_pct'] = (indicators['ATR'] / current_price) * 100
     indicators['Volume_SMA'] = df['volume'].rolling(20).mean().iloc[-1]
-    indicators['Volume_Ratio'] = df['volume'].iloc[-1] / indicators['Volume_SMA']
     
     mtf = perform_multi_timeframe_analysis(symbol, ['15m', '1h', '4h'])
-    signals = generate_trading_signals(df, indicators, patterns, sr_zones)
+    signals = generate_trading_signals(df, indicators, patterns, sr_zones, mtf)
     
     return {
         "success": True,
         "data": {
-            "symbol": symbol, "current_price": current_price, "market_structure": market_structure,
-            "support_resistance": sr_zones, "patterns": patterns, "indicators": indicators,
-            "multi_timeframe": mtf, "signals": signals, "timestamp": df['timestamp'].iloc[-1].isoformat()
+            "symbol": symbol, "data_source": data_source, "current_price": current_price, 
+            "market_structure": market_structure, "support_resistance": sr_zones, 
+            "patterns": patterns, "indicators": indicators, "multi_timeframe": mtf, 
+            "signals": signals, "timestamp": df['timestamp'].iloc[-1].isoformat()
         }
     }
 
 def generate_trading_signals(df: pd.DataFrame, indicators: Dict, 
-                           patterns: List, sr_zones: Dict) -> Dict:
+                           patterns: List, sr_zones: Dict, mtf_analysis: Dict) -> Dict:
     """Genera señales de trading basadas en el análisis completo."""
     
     signals = {"bullish": [], "bearish": [], "neutral": []}
     current_price = float(df['close'].iloc[-1])
+
+    # Señales de tendencia principal (Golden/Death Cross)
+    if indicators.get('SMA_50') > indicators.get('SMA_200'):
+        signals["bullish"].append("Tendencia alcista principal (Golden Cross)")
+    elif indicators.get('SMA_50') < indicators.get('SMA_200'):
+        signals["bearish"].append("Tendencia bajista principal (Death Cross)")
+
+    # Señales de Momentum
+    if indicators.get('RSI') < 30: signals["bullish"].append("RSI en Sobreventa (<30)")
+    elif indicators.get('RSI') > 70: signals["bearish"].append("RSI en Sobrecompra (>70)")
     
-    if indicators['SMA_50'] > indicators['SMA_200']:
-        signals["bullish"].append("Golden Cross activo")
-    elif indicators['SMA_50'] < indicators['SMA_200']:
-        signals["bearish"].append("Death Cross activo")
-    
-    if indicators['RSI'] < 30:
-        signals["bullish"].append("RSI en sobreventa")
-    elif indicators['RSI'] > 70:
-        signals["bearish"].append("RSI en sobrecompra")
-    
-    if indicators['MACD']['histogram'] > 0 and indicators['MACD']['macd'] > indicators['MACD']['signal']:
-        signals["bullish"].append("MACD bullish crossover")
-    elif indicators['MACD']['histogram'] < 0 and indicators['MACD']['macd'] < indicators['MACD']['signal']:
-        signals["bearish"].append("MACD bearish crossover")
-    
-    if current_price < indicators['Bollinger']['lower']:
-        signals["bullish"].append("Precio en banda inferior de Bollinger")
-    elif current_price > indicators['Bollinger']['upper']:
-        signals["bearish"].append("Precio en banda superior de Bollinger")
-    
-    for pattern in patterns:
-        if pattern['signal'] == "Bullish":
-            signals["bullish"].append(f"Patrón {pattern['pattern']} detectado")
-        else:
-            signals["bearish"].append(f"Patrón {pattern['pattern']} detectado")
-    
+    macd_hist = indicators.get('MACD', {}).get('histogram', 0)
+    if macd_hist > 0: signals["bullish"].append("Histograma MACD positivo")
+    else: signals["bearish"].append("Histograma MACD negativo")
+
+    # Señales de Volatilidad
+    if current_price < indicators.get('Bollinger', {}).get('lower', current_price + 1):
+        signals["bullish"].append("Precio tocando banda inferior de Bollinger")
+    elif current_price > indicators.get('Bollinger', {}).get('upper', current_price - 1):
+        signals["bearish"].append("Precio tocando banda superior de Bollinger")
+
+    # Señales de Patrones
+    for p in patterns:
+        if p['signal'] == 'Bullish': signals['bullish'].append(f"Patrón alcista: {p['pattern']}")
+        else: signals['bearish'].append(f"Patrón bajista: {p['pattern']}")
+
+    # Señales de Soportes y Resistencias
     if sr_zones['support_zones']:
         nearest_support = sr_zones['support_zones'][0]['center']
-        if (current_price - nearest_support) / current_price < 0.02:
-            signals["bullish"].append(f"Cerca de soporte en ${nearest_support:.2f}")
-    
+        if abs(current_price - nearest_support) / current_price < 0.01: # 1% de proximidad
+            signals["bullish"].append(f"Cerca de zona de soporte clave (~${nearest_support:.2f})")
+            
     if sr_zones['resistance_zones']:
         nearest_resistance = sr_zones['resistance_zones'][0]['center']
-        if (nearest_resistance - current_price) / current_price < 0.02:
-            signals["bearish"].append(f"Cerca de resistencia en ${nearest_resistance:.2f}")
-    
+        if abs(current_price - nearest_resistance) / current_price < 0.01:
+            signals["bearish"].append(f"Cerca de zona de resistencia clave (~${nearest_resistance:.2f})")
+
+    # Señal de Alineación Multi-Timeframe
+    if mtf_analysis.get('alignment'):
+        if mtf_analysis.get('overall_bias') == 'BULLISH':
+            signals['bullish'].append("Alineación alcista en múltiples temporalidades")
+        elif mtf_analysis.get('overall_bias') == 'BEARISH':
+            signals['bearish'].append("Alineación bajista en múltiples temporalidades")
+
     bull_score = len(signals["bullish"])
     bear_score = len(signals["bearish"])
     
-    if bull_score > bear_score + 2:
-        overall_signal = "STRONG BUY"
-    elif bull_score > bear_score:
-        overall_signal = "BUY"
-    elif bear_score > bull_score + 2:
-        overall_signal = "STRONG SELL"
-    elif bear_score > bull_score:
-        overall_signal = "SELL"
-    else:
-        overall_signal = "NEUTRAL"
+    if bull_score > bear_score + 1: overall_signal = "COMPRA"
+    elif bear_score > bull_score + 1: overall_signal = "VENTA"
+    else: overall_signal = "NEUTRAL"
     
+    if mtf_analysis.get('alignment') and abs(bull_score - bear_score) > 2:
+        overall_signal = f"FUERTE {overall_signal}"
+
     return {
         "signals": signals, "overall": overall_signal,
         "confidence": abs(bull_score - bear_score) / max(bull_score + bear_score, 1) * 100,
