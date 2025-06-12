@@ -1,4 +1,4 @@
-# Archivo: tools/strategy_tools_v2.py
+# Archivo: tools/strategy_tools.py (Versión Corregida)
 
 import numpy as np
 import pandas as pd
@@ -36,6 +36,12 @@ class AdvancedStrategyGenerator:
     def calculate_position_size(self, capital: float, entry: float, stop_loss: float, 
                               risk_level: str = "medium") -> Dict:
         """Calcula el tamaño de posición basado en gestión de riesgo."""
+        if entry == stop_loss: # Evitar división por cero
+            return {
+                "position_size_usd": 0, "leverage": 1.0, "risk_amount": 0,
+                "risk_percentage": 0, "coins": 0, "error": "Entry and Stop-Loss are the same."
+            }
+
         risk_amount = capital * self.risk_multipliers[risk_level]
         price_risk = abs(entry - stop_loss) / entry
         
@@ -52,16 +58,23 @@ class AdvancedStrategyGenerator:
         
         position_size_usd = min(position_size_usd, max_position)
         
+        # --- INICIO DE LA CORRECCIÓN ---
         # Calcular apalancamiento real necesario
         leverage_needed = position_size_usd / capital
-        leverage_used = min(leverage_needed, self.leverage_limits[risk_level])
         
+        # CORRECCIÓN: El apalancamiento mínimo es 1x. Si se necesita menos, es una operación sin apalancamiento.
+        leverage_used = max(1.0, leverage_needed)
+        
+        # Aplicar el límite máximo de apalancamiento según el perfil de riesgo
+        leverage_used = min(leverage_used, self.leverage_limits[risk_level])
+        # --- FIN DE LA CORRECCIÓN ---
+
         return {
             "position_size_usd": round(position_size_usd, 2),
             "leverage": round(leverage_used, 1),
             "risk_amount": round(risk_amount, 2),
             "risk_percentage": round((risk_amount / capital) * 100, 2),
-            "coins": round(position_size_usd / entry, 8)
+            "coins": round(position_size_usd / entry, 8) if entry > 0 else 0
         }
     
     def generate_entry_zones(self, current_price: float, trend: str, 
@@ -257,9 +270,15 @@ def generate_advanced_trading_strategy(scores: Dict, tech_data: Dict,
     
     # Datos técnicos
     current_price = tech_data.get("current_price", 0)
-    support = tech_data.get("key_levels", {}).get("support", [current_price * 0.95])[0]
-    resistance = tech_data.get("key_levels", {}).get("resistance", [current_price * 1.05])[0]
+    if current_price == 0:
+        return {"error": "Invalid current_price (0) for strategy generation."}
+
+    support_list = tech_data.get("key_levels", {}).get("support", [])
+    resistance_list = tech_data.get("key_levels", {}).get("resistance", [])
     
+    support = support_list[0] if support_list else current_price * 0.95
+    resistance = resistance_list[0] if resistance_list else current_price * 1.05
+
     # Score consolidado
     total_score = (
         scores.get("technical_analysis", 0) * 0.5 +
@@ -313,15 +332,15 @@ def generate_advanced_trading_strategy(scores: Dict, tech_data: Dict,
             entry_zone, timeframe, total_score
         )
         
+        rr_ratio = abs((targets[0]["price"] - entry_zone) / (entry_zone - stop_loss)) if (entry_zone - stop_loss) != 0 else 0
+
         strategy.update({
             "type": "Direccional",
             "position_sizing": position_calc,
             "entry_zones": entry_zones,
             "stop_loss": round(stop_loss, 4),
             "targets": targets,
-            "risk_reward_ratio": round(
-                (targets[0]["price"] - entry_zone) / (entry_zone - stop_loss), 2
-            ),
+            "risk_reward_ratio": round(rr_ratio, 2),
             "holding_period": generator.timeframe_configs[timeframe]["hold_time"]
         })
     
@@ -468,7 +487,7 @@ def calculate_risk_metrics(strategy: Dict, capital: float,
     avg_win = volatility * 2  # Ganancia promedio
     avg_loss = volatility  # Pérdida promedio
     
-    kelly_pct = ((win_rate * avg_win) - ((1 - win_rate) * avg_loss)) / avg_win
+    kelly_pct = ((win_rate * avg_win) - ((1 - win_rate) * avg_loss)) / (avg_win or 1)
     
     return {
         "value_at_risk_95": round(var_95, 2),
@@ -476,7 +495,7 @@ def calculate_risk_metrics(strategy: Dict, capital: float,
         "kelly_criterion": round(kelly_pct * 100, 1),
         "recommended_allocation": round(min(kelly_pct * capital, capital * 0.25), 2),
         "break_even_trades": calculate_breakeven_trades(strategy),
-        "profit_factor": round(win_rate * avg_win / ((1-win_rate) * avg_loss), 2)
+        "profit_factor": round(win_rate * avg_win / ((1-win_rate) * avg_loss), 2) if (1-win_rate) * avg_loss != 0 else 0
     }
 
 def calculate_breakeven_trades(strategy: Dict) -> int:
@@ -488,7 +507,8 @@ def calculate_breakeven_trades(strategy: Dict) -> int:
     else:
         # Basado en risk/reward ratio
         rr_ratio = strategy.get("risk_reward_ratio", 2)
-        return max(1, int(1 / (rr_ratio / (1 + rr_ratio))))
+        if rr_ratio <= -1: return 100 # Evitar división por cero o resultados raros
+        return max(1, int(1 / (rr_ratio / (1 + rr_ratio)))) if (rr_ratio / (1 + rr_ratio)) != 0 else 100
 
 # Función helper para análisis avanzado con indicadores
 def calculate_advanced_indicators(df: pd.DataFrame) -> Dict:
@@ -512,8 +532,11 @@ def calculate_advanced_indicators(df: pd.DataFrame) -> Dict:
     
     # Volumen
     indicators['OBV'] = talib.OBV(df['close'], df['volume'])
-    indicators['VWAP'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
-    
+    if not df['volume'].cumsum().eq(0).any():
+      indicators['VWAP'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
+    else:
+      indicators['VWAP'] = pd.Series(np.nan, index=df.index)
+
     # Patrones
     indicators['DOJI'] = talib.CDLDOJI(df['open'], df['high'], df['low'], df['close'])
     indicators['HAMMER'] = talib.CDLHAMMER(df['open'], df['high'], df['low'], df['close'])

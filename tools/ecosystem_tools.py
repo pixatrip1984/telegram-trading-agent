@@ -6,9 +6,18 @@ from .bybit_tools import get_price
 class EcosystemMapper:
     """Mapea relaciones entre tokens y ecosistemas crypto."""
     
+class EcosystemMapper:
+    """Mapea relaciones entre tokens y ecosistemas crypto."""
+    
     def __init__(self):
-        # Mapa simplificado y claro de ecosistemas
         self.ecosystems = {
+            # --- NUEVO ECOSISTEMA AÑADIDO ---
+            "BITCOIN": {
+                "parent": "BTC",
+                "layer2": ["STX", "ROOT", "ICP"], # Stacks, Rootstock, Internet Computer
+                "defi": ["ALEX", "SOV"], # Proyectos DeFi en segundas capas de BTC
+                "memes": ["ORDI", "SATS"] # BRC-20 tokens
+            },
             "ETHEREUM": {
                 "parent": "ETH",
                 "layer2": ["MATIC", "ARB", "OP"],
@@ -17,7 +26,7 @@ class EcosystemMapper:
             },
             "SOLANA": {
                 "parent": "SOL",
-                "defi": ["RAY", "ORCA"],
+                "defi": ["RAY", "ORCA", "JUP"],
                 "memes": ["BONK", "WIF", "CHILLGUY"]
             },
             "BNB": {
@@ -26,6 +35,7 @@ class EcosystemMapper:
                 "memes": ["BABYDOGE"]
             }
         }
+        
         
         self.categories = {
             "AI": ["FET", "AGIX", "RNDR", "TAO"],
