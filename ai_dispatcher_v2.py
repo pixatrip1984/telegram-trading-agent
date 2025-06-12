@@ -43,9 +43,10 @@ asset_mapper = AssetMapper()
 
 # Para tareas rápidas, interactivas o de bajo coste
 FAST_MODEL = "google/gemini-flash-1.5"
-SMART_MODEL= "deepseek/deepseek-chat"
+#SMART_MODEL="deepseek/deepseek-r1-0528-qwen3-8b:free"
+#SMART_MODEL= "deepseek/deepseek-r1:free"
 # Para tareas complejas que requieren la máxima calidad y razonamiento
-#SMART_MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1:free"
+SMART_MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1:free"
 
 # Archivo: ai_dispatcher_v2.py
 
@@ -283,20 +284,24 @@ def handle_traditional_market_analysis(params: dict, chat_id: int) -> str:
 
 def handle_technical_analysis_v2(params: dict, chat_id: int) -> dict:
     """
-    Handler para análisis técnico que ahora también genera un gráfico.
-    Devuelve un diccionario con el texto del análisis y la ruta al gráfico.
+    Handler para análisis técnico que ahora devuelve un diccionario completo
+    para construir la respuesta y los botones de callback.
     """
-    print("\n=== HANDLER: Análisis Técnico (con Gráfico) ===")
+    print("\n=== HANDLER: Análisis Técnico (con Gráfico y datos para callback) ===")
     asset = params.get("asset_name")
-    if not asset or asset == "NONE":
-        return {"text": "Claro, ¿de qué activo te gustaría un análisis técnico? Por ejemplo: `Análisis de BTC`.", "chart_path": None}
-    
     timeframe = params.get("timeframe", "1h")
+
+    if not asset or asset == "NONE":
+        return {"text": "Claro, ¿de qué activo te gustaría un análisis técnico?", "chart_path": None, "asset": None, "timeframe": None}
+    
     print(f"-> Analizando {asset} en timeframe {timeframe}...")
     
     result = advanced_technical_analysis(asset, interval=timeframe)
     if not result.get("success"):
-        return {"text": f"No pude analizar {asset}. Verifica que el símbolo sea correcto. Causa: {result.get('message', 'Desconocida')}", "chart_path": None}
+        return {
+            "text": f"No pude analizar {asset}. Verifica que el símbolo sea correcto. Causa: {result.get('message', 'Desconocida')}",
+            "chart_path": None, "asset": asset, "timeframe": timeframe
+        }
     
     data = result.get("data", {})
     signals = data.get("signals", {})
@@ -315,7 +320,8 @@ def handle_technical_analysis_v2(params: dict, chat_id: int) -> dict:
     summary = {
         "símbolo": data.get("symbol"), "precio_actual": data.get("current_price"), "tendencia_general": signals.get("overall"),
         "score_confianza": signals.get("confidence"), "estructura_mercado": data.get("market_structure", {}).get("structure"),
-        "sesgo_mtf": data.get("multi_timeframe", {}).get("overall_bias"), "señales_alcistas": signals.get("signals", {}).get("bullish"),
+        "sesgo_mtf": data.get("multi_timeframe", {}).get("overall_bias"), 
+        "señales_alcistas": signals.get("signals", {}).get("bullish"),
         "señales_bajistas": signals.get("signals", {}).get("bearish"),
         "soportes_clave": [round(s, 2) for s in support_levels], 
         "resistencias_clave": [round(r, 2) for r in resistance_levels],
@@ -350,35 +356,145 @@ def handle_technical_analysis_v2(params: dict, chat_id: int) -> dict:
     <i>[Recomendación clara. ¿Buscar largos, cortos, o esperar? ¿En qué niveles?]</i>
     """
     
-    # --- INICIO DE LA CORRECCIÓN ---
     final_report = "❌ No se pudo generar el informe de análisis técnico. La IA no respondió."
-    # --- FIN DE LA CORRECCIÓN ---
-    
     try:
-        print(f"-> Intentando síntesis de AT con {SMART_MODEL}...")
+        # --- INICIO DE LA CORRECCIÓN: LLAMADA A LA IA COMPLETA Y CORRECTA ---
+        print("-> Intentando síntesis de AT con SMART_MODEL...")
         response = ai_client.chat.completions.create(
             model=SMART_MODEL,
-            messages=[{"role": "system", "content": "Genera resúmenes de análisis técnico en HTML para Telegram."}, {"role": "user", "content": analysis_prompt_text}]
+            messages=[
+                {"role": "system", "content": "Eres un analista experto de criptomonedas para Telegram."},
+                {"role": "user", "content": analysis_prompt_text}
+            ]
         )
         if response and response.choices:
             final_report = response.choices[0].message.content
-    except Exception as e:
-        print(f"Error con SMART_MODEL en AT: {e}")
+        # --- FIN DE LA CORRECCIÓN ---
 
-        # Fallback si el modelo inteligente falla
-        try:
-            print(f"-> Fallback de AT a {FAST_MODEL}...")
-            response = ai_client.chat.completions.create(
-                model=FAST_MODEL,
-                messages=[{"role": "system", "content": "Genera resúmenes de análisis técnico en HTML para Telegram."}, {"role": "user", "content": analysis_prompt_text}]
-            )
-            if response and response.choices:
-                final_report = response.choices[0].message.content
-        except Exception as fallback_e:
-            print(f"Error con FAST_MODEL en AT: {fallback_e}")
-            final_report = "❌ Error crítico. Ambos modelos de IA (inteligente y rápido) fallaron al generar el informe de análisis."
+    except Exception as e:
+        print(f"Error en la síntesis de la IA: {e}")
+        # (Opcional: podrías añadir aquí el fallback al FAST_MODEL si lo deseas)
+
+    return {
+        "text": final_report, 
+        "chart_path": chart_path,
+        "asset": asset,
+        "timeframe": timeframe
+    }
+
+def process_request_v2(user_message: str, history: list, chat_id: int) -> dict:
+    """
+    Procesa la solicitud del usuario usando un router que ahora considera el historial.
+    Devuelve un diccionario con el texto de la respuesta y una ruta opcional a un gráfico.
+    """
+    try:
+        # --- INICIO DE LA MEJORA: ROUTER CON CONTEXTO ---
+        # Formateamos el historial para que la IA lo entienda fácilmente.
+        formatted_history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history[-4:]]) # Últimos 4 mensajes
+        
+        router_prompt = f"""
+        Analiza el 'NUEVO MENSAJE' del usuario teniendo en cuenta el 'HISTORIAL DE CONVERSACIÓN' para entender el contexto.
+        Tu tarea es clasificar la intención y extraer parámetros. Si el usuario dice "otra vez" o "y ahora en X timeframe",
+        usa el activo del historial para el parámetro 'asset_name'.
+
+        HISTORIAL DE CONVERSACIÓN:
+        {formatted_history}
+
+        NUEVO MENSAJE: '{user_message}'
+        """
+        
+        router_messages = [
+            {"role": "system", "content": SYSTEM_PROMPTS["router_advanced"]},
+            {"role": "user", "content": router_prompt}
+        ]
+        # --- FIN DE LA MEJORA ---
+
+        router_response = ai_client.chat.completions.create(
+            model=FAST_MODEL, 
+            messages=router_messages, 
+            tools=[advanced_router_tool], 
+            tool_choice="auto"
+        )
+
+        if not router_response.choices[0].message.tool_calls:
+            return {"text": handle_conversation_v2(user_message, history, chat_id)}
+
+        tool_call = router_response.choices[0].message.tool_calls[0]
+        params = json.loads(tool_call.function.arguments)
+
+        # Lógica de enriquecimiento de parámetros con fallback al historial
+        if params.get("asset_name") == "NONE":
+            last_asset_from_history = asset_mapper.extract_asset_from_history(history)
+            if last_asset_from_history:
+                params["asset_name"] = last_asset_from_history
+                print(f"-> Activo no encontrado en el mensaje, recuperado del historial: {last_asset_from_history}")
+        
+        if params.get("asset_name") == "NONE":
+             params["asset_name"] = asset_mapper.extract_asset_from_text(user_message)
+
+        intention = params["intention"]
+        asset_name = params.get("asset_name")
+        print(f"\n=== CLASIFICACIÓN FINAL ===\nIntención: {intention}\nActivo: {asset_name if asset_name and asset_name != 'NONE' else 'N/A'}")
+
+        # --- Enrutamiento a los Handlers ---
+        
+        # Handlers que devuelven un dict completo (con posible gráfico)
+        if intention == "specific_asset_analysis":
+            if not asset_name or asset_name == 'NONE': 
+                return {"text": "Por favor, especifica qué activo quieres analizar o pídeme un análisis primero."}
+            if asset_mapper.is_traditional_asset(asset_name):
+                # Los activos tradicionales usan un handler que solo devuelve texto
+                return {"text": handle_traditional_market_analysis(params, chat_id)}
+            else:
+                params["asset_name"] = asset_mapper.normalize_to_trading_pair(asset_name)
+                # Este handler devuelve un dict completo: {"text": ..., "chart_path": ...}
+                return handle_technical_analysis_v2(params, chat_id)
+        
+        # Handlers que siempre devuelven solo texto
+        response_text = ""
+        if intention == "global_market_report":
+            response_text = handle_global_market_report(chat_id)
+        elif intention == "strategy_full":
+            if not asset_name or asset_name == 'NONE' or asset_mapper.is_traditional_asset(asset_name):
+                response_text = "Para generar una estrategia, necesito un activo de criptomoneda. Ejemplo: `estrategia para SOL`."
+            else:
+                params["asset_name"] = asset_mapper.normalize_to_trading_pair(asset_name)
+                response_text = handle_advanced_strategy(params, chat_id)
+        elif intention == "ecosystem_analysis":
+            if not asset_name or asset_name == 'NONE':
+                response_text = "Por favor, dime de qué activo quieres analizar el ecosistema."
+            else:
+                response_text = handle_ecosystem_analysis(params, chat_id)
+        elif intention == "whale_analysis":
+            if not asset_name or asset_name == 'NONE':
+                response_text = "Claro, ¿de qué activo quieres el análisis de ballenas?"
+            else:
+                response_text = handle_whale_analysis(params, chat_id)
+        elif intention == "sentiment_check":
+            if not asset_name or asset_name == 'NONE':
+                response_text = "Por supuesto, ¿de qué activo quieres que analice el sentimiento?"
+            else:
+                response_text = handle_sentiment_analysis(params, chat_id)
+        elif intention == "top_traded":
+            response_text = handle_top_traded(chat_id)
+        elif intention == "top_gainers":
+            response_text = handle_top_gainers(chat_id)
+        elif intention == "cross_reference_lists":
+            response_text = handle_cross_reference(chat_id)
+        elif intention == "general_web_query":
+            response_text = handle_general_web_query(user_message, ai_client)
+        elif intention == "conversation":
+            response_text = handle_conversation_v2(user_message, history, chat_id)
+        else:
+            # Fallback si una intención no está mapeada
+            response_text = handle_conversation_v2(user_message, history, chat_id)
             
-    return {"text": final_report, "chart_path": chart_path}
+        return {"text": response_text}
+
+    except Exception as e:
+        print(f"Error CRÍTICO en process_request_v2: {e}")
+        traceback.print_exc()
+        return {"text": "❌ Ocurrió un error inesperado al procesar tu solicitud. El equipo técnico ha sido notificado."}
 
 def handle_advanced_strategy(params: dict, chat_id: int) -> str:
     print("\n=== HANDLER: Estrategia Avanzada ===")
@@ -680,10 +796,10 @@ def process_request_v2(user_message: str, history: list, chat_id: int) -> dict:
 
 def generate_proactive_strategy(event: dict, capital: float) -> dict:
     """
-    Usa la IA para generar solo el PÁRRAFO de análisis. El resto se construye en código.
-    Versión mejorada con manejo robusto de errores y reintentos.
+    Usa la IA para generar el análisis. El resto se construye en código.
+    Versión robustecida para manejar la obtención de precios.
     """
-    print(f"-> Generando análisis para {event['asset']}...")
+    print(f"-> Generando análisis proactivo para {event['asset']}...")
     
     MAX_RETRIES = 3
     retry_count = 0
@@ -715,24 +831,37 @@ def generate_proactive_strategy(event: dict, capital: float) -> dict:
                 
             analysis_text = response.choices[0].message.content
             
-            # Calcular gestión de riesgo
-            user_profile = {"capital": capital, "risk_level": "medium", "timeframe": "1h"}
-            current_price = full_data.get("whale_activity", {}).get('btc_price_used', 0) or \
-                            full_data.get("whale_activity", {}).get('eth_price_used', 0)
+            # --- INICIO DE LA CORRECIÓN ---
+            # Obtener el precio de forma más segura
+            whale_activity_data = full_data.get("whale_activity", {})
+            current_price = whale_activity_data.get('price_used', 0) # La clave correcta es 'price_used'
+            
+            # Si la clave 'price_used' no está (versiones antiguas), intentamos con las específicas
+            if current_price == 0:
+                 current_price = whale_activity_data.get('btc_price_used', 0) or whale_activity_data.get('eth_price_used', 0)
             
             if current_price == 0: 
                 raise ValueError("Precio actual es 0 para cálculo de estrategia")
-                
+            # --- FIN DE LA CORRECCIÓN ---
+
+            user_profile = {"capital": capital, "risk_level": "medium", "timeframe": "1h"}
             tech_data_mock = {
                 "current_price": current_price,
                 "key_levels": {
-                    "support": [current_price * 0.97], # SL al 3%
+                    "support": [current_price * 0.97],
                     "resistance": [current_price * 1.03]
                 }
             }
             
+            # Usamos una estructura de 'scores' simulada para la función de estrategia
+            sentiment = full_data.get("overall_sentiment", {})
+            sentiment_score = sentiment.get("sentiment_score", 50)
+            technical_score = 5 if sentiment.get("classification", "").endswith("Bullish") else -5 if sentiment.get("classification", "").endswith("Bearish") else 0
+            
+            mock_scores = { "technical_analysis": technical_score, "sentiment": (sentiment_score-50)/5 }
+
             strategy_data = generate_advanced_trading_strategy(
-                scores={}, 
+                scores=mock_scores, 
                 tech_data=tech_data_mock, 
                 multi_tf_data={}, 
                 user_profile=user_profile
