@@ -1,131 +1,94 @@
+# Archivo: tools/chart_tools.py
+
 import os
 import mplfinance as mpf
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
+import traceback
+import talib
 from tools.analysis_tools import get_historical_data_extended
-from matplotlib.colors import LinearSegmentedColormap
 
-def generate_candlestick_chart(symbol, interval='1h', title=None, support_levels=None, resistance_levels=None):
+def generate_candlestick_chart(
+    symbol: str, 
+    interval: str = '1h', 
+    title: str = None, 
+    support_levels: list = None, 
+    resistance_levels: list = None
+) -> str:
     """
-    Genera un gráfico de velas con niveles de soporte/resistencia y heatmap de liquidación
-    
-    Args:
-        symbol (str): Símbolo del activo (ej: 'BTCUSDT')
-        interval (str): Intervalo de tiempo (ej: '1h', '4h', '1d')
-        title (str): Título personalizado para el gráfico
-        support_levels (list): Lista de niveles de soporte
-        resistance_levels (list): Lista de niveles de resistencia
-        
-    Returns:
-        str: Ruta al archivo de imagen generado
+    Genera un gráfico de velas con niveles de S/R, Medias Móviles y Bandas de Bollinger.
     """
-    # Obtener datos históricos
-    data = get_historical_data_extended(symbol, interval=interval, limit=100)
-    if data is None or data.empty:
+    print(f"-> Generando gráfico avanzado para {symbol} en {interval}...")
+    # Pedimos más datos para que los indicadores se calculen bien
+    data = get_historical_data_extended(symbol, interval=interval, limit=200)
+    if data is None or data.empty or not isinstance(data.index, pd.DatetimeIndex):
+        print(f"  ❌ Datos insuficientes o mal formateados para el gráfico de {symbol}.")
         return None
 
-    # Crear mapa de colores para el heatmap de liquidación
-    colors = ["#4B0082", "#0000FF", "#00FF00", "#FFFF00"]  # Morado -> Azul -> Verde -> Amarillo
-    cmap = LinearSegmentedColormap.from_list("liquidation_heatmap", colors)
-    
-    # Configuración del estilo
+    # Tomamos las últimas 100 velas para que el gráfico no esté muy apretado
+    plot_data = data.tail(100)
+
+    mc = mpf.make_marketcolors(
+        up='#2ECC71', down='#E74C3C',
+        wick={'up':'#2ECC71', 'down':'#E74C3C'},
+        edge='inherit', volume='inherit'
+    )
     style = mpf.make_mpf_style(
         base_mpf_style='charles',
-        marketcolors=mpf.make_marketcolors(
-            up='#2ECC71',  # Verde para velas alcistas
-            down='#E74C3C',  # Rojo para velas bajistas
-            wick={'up':'#2ECC71', 'down':'#E74C3C'},
-            edge={'up':'#2ECC71', 'down':'#E74C3C'},
-            volume='in'
-        ),
-        facecolor='#1E1E2D',  # Fondo oscuro
-        edgecolor='#2D2D44',
-        figcolor='#1E1E2D',
-        gridcolor='#2D2D44',
-        gridstyle='--',
-        rc={
-            'axes.labelcolor': 'white',
-            'xtick.color': 'white',
-            'ytick.color': 'white',
-            'font.size': 9
-        }
+        marketcolors=mc,
+        facecolor='#1E1E2D', figcolor='#1E1E2D',
+        gridcolor='#2D2D44', gridstyle='--',
+        rc={'axes.labelcolor': 'white', 'xtick.color': 'white', 'ytick.color': 'white'}
     )
     
-    # Crear figura
-    fig, axes = mpf.plot(
-        data,
-        type='candle',
-        style=style,
-        title=title or f"{symbol} - {interval}",
-        ylabel=f"Precio ({symbol})",
-        volume=True,
-        figratio=(12, 8),
-        figscale=1.2,
-        returnfig=True,
-        show_nontrading=False,
-        warn_too_much_data=10000
-    )
+    # --- Añadir Indicadores al Gráfico ---
+    plots_to_add = []
     
-    ax_main = axes[0]
-    ax_vol = axes[2]
-    
-    # Agregar niveles de soporte y resistencia
+    # 1. Medias Móviles (SMA 20 y 50)
+    sma20 = talib.SMA(data['close'], timeperiod=20)
+    sma50 = talib.SMA(data['close'], timeperiod=50)
+    plots_to_add.append(mpf.make_addplot(sma20.tail(100), color='cyan', width=0.7))
+    plots_to_add.append(mpf.make_addplot(sma50.tail(100), color='yellow', width=0.7))
+
+    # 2. Bandas de Bollinger
+    upper, middle, lower = talib.BBANDS(data['close'], timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+    plots_to_add.append(mpf.make_addplot(upper.tail(100), color='gray', width=0.6, linestyle='--'))
+    plots_to_add.append(mpf.make_addplot(lower.tail(100), color='gray', width=0.6, linestyle='--'))
+
+    # 3. Niveles de Soporte y Resistencia
     if support_levels:
         for level in support_levels:
-            ax_main.axhline(y=level, color='#2ECC71', linestyle='-', alpha=0.7, linewidth=1.5)
-            ax_main.annotate(f'Soporte: {level:.4f}', 
-                             (data.index[-10], level), 
-                             xytext=(0, 10), 
-                             textcoords='offset points',
-                             color='#2ECC71',
-                             fontsize=9,
-                             ha='right')
-    
+            line = pd.Series([float(level)] * len(plot_data), index=plot_data.index)
+            plots_to_add.append(mpf.make_addplot(line, color='#3498DB', width=1.0, linestyle='-.')) # Azul para soporte
+            
     if resistance_levels:
         for level in resistance_levels:
-            ax_main.axhline(y=level, color='#E74C3C', linestyle='-', alpha=0.7, linewidth=1.5)
-            ax_main.annotate(f'Resistencia: {level:.4f}', 
-                             (data.index[-10], level), 
-                             xytext=(0, -15), 
-                             textcoords='offset points',
-                             color='#E74C3C',
-                             fontsize=9,
-                             ha='right')
-    
-    # Simular heatmap de liquidación (datos reales requerirían API de liquidaciones)
-    # Esto es un placeholder hasta que implementemos datos reales
-    if len(data) > 20:
-        price_range = np.linspace(data['low'].min(), data['high'].max(), 100)
-        time_range = np.arange(len(data))
-        xx, yy = np.meshgrid(time_range, price_range)
+            line = pd.Series([float(level)] * len(plot_data), index=plot_data.index)
+            plots_to_add.append(mpf.make_addplot(line, color='#F39C12', width=1.0, linestyle='-.')) # Naranja para resistencia
         
-        # Crear datos simulados para el heatmap
-        z = np.sin(xx/5) * np.cos(yy/100)  # Función de ejemplo
-        
-        heatmap = ax_main.pcolormesh(
-            xx, yy, z,
-            cmap=cmap,
-            alpha=0.15,
-            shading='auto'
+    try:
+        chart_dir = os.path.join(os.getcwd(), 'charts')
+        os.makedirs(chart_dir, exist_ok=True)
+        chart_path = os.path.join(chart_dir, f"{symbol.replace('/', '_')}_{interval}_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.png")
+
+        mpf.plot(
+            plot_data, # Graficamos solo las últimas 100 velas
+            type='candle',
+            style=style,
+            title=title or f"\nAnálisis Técnico de {symbol} - {interval}",
+            ylabel='Precio (USD)',
+            volume=True,
+            figratio=(16, 9),
+            figscale=1.5, # Hacemos el gráfico un poco más grande
+            addplot=plots_to_add if plots_to_add else None,
+            savefig=chart_path,
+            show_nontrading=False
         )
         
-        # Agregar barra de color para el heatmap
-        cbar = fig.colorbar(heatmap, ax=ax_main, pad=0.02)
-        cbar.set_label('Intensidad de Liquidación', color='white')
-        cbar.ax.yaxis.set_tick_params(color='white')
-        cbar.outline.set_edgecolor('#2D2D44')
-        plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
-    
-    # Configurar ejes
-    ax_main.set_facecolor('#1E1E2D')
-    ax_vol.set_facecolor('#1E1E2D')
-    
-    # Guardar gráfico
-    chart_dir = os.path.join(os.getcwd(), 'charts')
-    os.makedirs(chart_dir, exist_ok=True)
-    chart_path = os.path.join(chart_dir, f"{symbol}_{interval}.png")
-    fig.savefig(chart_path, bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    
-    return chart_path
+        print(f"  ✅ Gráfico avanzado guardado en: {chart_path}")
+        return chart_path
+
+    except Exception as e:
+        print(f"  ❌ Error al generar el gráfico con mplfinance: {e}")
+        traceback.print_exc()
+        return None

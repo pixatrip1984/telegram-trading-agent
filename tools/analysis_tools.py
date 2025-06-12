@@ -5,49 +5,36 @@ import numpy as np
 import talib
 from typing import Dict, List, Optional, Tuple
 
-# --- INICIO DE MODIFICACIONES ---
 from .bybit_tools import session as bybit_session
-from .binance_tools import get_historical_data_binance # Importamos la nueva función
-# --- FIN DE MODIFICACIONES ---
+from .binance_tools import get_historical_data_binance
 
+# ... (todas las funciones desde get_historical_data_extended hasta perform_multi_timeframe_analysis no necesitan cambios) ...
 def get_historical_data_extended(symbol: str, interval: str = 'D', limit: int = 1000) -> Optional[pd.DataFrame]:
     """
-    Obtiene datos históricos extendidos haciendo múltiples llamadas a Bybit.
-    Si falla en Bybit, intenta obtener los datos de Binance como fallback.
+    Obtiene datos históricos extendidos y se asegura de que el índice sea DatetimeIndex.
     """
     symbol = symbol.upper()
-    if symbol.endswith('USDT'):
-        # Para las búsquedas, es mejor usar el símbolo sin el par a veces
-        base_symbol = symbol.replace('USDT', '')
-    else:
-        base_symbol = symbol
+    if not symbol.endswith('USDT'):
         symbol += 'USDT'
 
     print(f"Iniciando búsqueda de datos históricos para {symbol}...")
 
-    # --- INICIO DE MODIFICACIONES: LÓGICA DE BÚSQUEDA MULTI-EXCHANGE ---
-
-    # Proveedor 1: Bybit (nuestro primario)
+    # Proveedor 1: Bybit
     print("-> Intentando obtener datos de Bybit...")
     df = get_historical_data_bybit(symbol, interval, limit)
     
     if df is not None and not df.empty:
         print("  -> Datos obtenidos exitosamente de Bybit.")
-        # Añadir una columna para saber de dónde vienen los datos
         df['source'] = 'Bybit'
         return df
 
-    # Proveedor 2: Binance (nuestro fallback)
+    # Proveedor 2: Binance (fallback)
     print("  -> Fallo en Bybit. Intentando obtener datos de Binance...")
-    
-    # Binance a veces usa intervalos diferentes ('1d' en vez de 'D')
-    # Mapeo de intervalos de Bybit a Binance
     interval_map_to_binance = {
         'D': '1d', 'W': '1w', 'M': '1M',
-        '1': '1m', '3': '3m', '5': '5m', '15': '15m', '30': '30m',
+        '1': '1m', '3': '3m', '5': '5m', '15': '15m', '30m': '30m',
         '60': '1h', '120': '2h', '240': '4h', '360': '6h', '720': '12h'
     }
-    # Obtener el intervalo de la API de Bybit primero
     bybit_api_interval = get_bybit_api_interval(interval)
     binance_interval = interval_map_to_binance.get(bybit_api_interval, bybit_api_interval)
 
@@ -56,15 +43,15 @@ def get_historical_data_extended(symbol: str, interval: str = 'D', limit: int = 
     if df_binance is not None and not df_binance.empty:
         print("  -> Datos obtenidos exitosamente de Binance.")
         df_binance['source'] = 'Binance'
+        if not isinstance(df_binance.index, pd.DatetimeIndex):
+             df_binance['timestamp'] = pd.to_datetime(df_binance['timestamp'])
+             df_binance = df_binance.set_index('timestamp')
         return df_binance
 
-    # --- FIN DE MODIFICACIONES ---
-
-    print(f"❌ No se pudieron obtener datos para {symbol} en ninguna de las fuentes disponibles (Bybit, Binance).")
+    print(f"❌ No se pudieron obtener datos para {symbol} en ninguna fuente.")
     return None
 
 def get_bybit_api_interval(interval: str) -> str:
-    """Helper para obtener el intervalo correcto para la API de Bybit v5."""
     interval_map = {
         '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30',
         '1h': '60', '2h': '120', '4h': '240', '6h': '360', '12h': '720',
@@ -73,26 +60,22 @@ def get_bybit_api_interval(interval: str) -> str:
     return interval_map.get(interval, interval)
 
 def get_historical_data_bybit(symbol: str, interval: str, limit: int) -> Optional[pd.DataFrame]:
-    """
-    Función interna para obtener datos históricos extendidos de Bybit.
-    """
     api_interval = get_bybit_api_interval(interval)
     
     try:
         all_data = []
         max_limit_per_call = 1000
-        total_limit = min(limit, 60000)
-        
+        # Bybit a veces devuelve los timestamps como strings, forzamos a numérico
         end_time = None
-        remaining = total_limit
-        
+        remaining = limit
+
         while remaining > 0:
             current_limit = min(remaining, max_limit_per_call)
             params = {
                 "category": "spot", "symbol": symbol, "interval": api_interval, "limit": current_limit
             }
             if end_time:
-                params["endTime"] = end_time
+                params["end"] = end_time
             
             response = bybit_session.get_kline(**params)
             
@@ -101,26 +84,29 @@ def get_historical_data_bybit(symbol: str, interval: str, limit: int) -> Optiona
                     response['result']['list'], 
                     columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover']
                 )
-                numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-                data[numeric_cols] = data[numeric_cols].apply(pd.to_numeric)
-                data['timestamp'] = pd.to_numeric(data['timestamp'])
-                data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+                
+                # Evitar que la siguiente llamada pida el mismo timestamp
+                end_time = int(data['timestamp'].min()) - 1
                 
                 all_data.append(data)
-                
-                end_time = int(data['timestamp'].min().timestamp() * 1000)
                 remaining -= len(data)
+
                 if len(data) < max_limit_per_call: # No hay más datos históricos
                     break
             else:
-                if response.get('retCode') != 0 and response.get('retCode') != 10001: # 10001 es "symbol not found"
+                if response.get('retCode') != 0 and response.get('retCode') != 10001: 
                     print(f"  Error de API Bybit: {response.get('retMsg')}")
                 break
         
         if all_data:
             combined_df = pd.concat(all_data, ignore_index=True)
+            numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'timestamp']
+            combined_df[numeric_cols] = combined_df[numeric_cols].apply(pd.to_numeric)
+            combined_df['timestamp'] = pd.to_datetime(combined_df['timestamp'], unit='ms')
+            
             combined_df = combined_df.sort_values('timestamp').reset_index(drop=True)
-            combined_df = combined_df.drop_duplicates(subset=['timestamp'])
+            combined_df = combined_df.drop_duplicates(subset=['timestamp'], keep='first')
+            combined_df = combined_df.set_index('timestamp')
             return combined_df
         
         return None
@@ -128,7 +114,6 @@ def get_historical_data_bybit(symbol: str, interval: str, limit: int) -> Optiona
     except Exception as e:
         print(f"Error obteniendo datos de Bybit: {e}")
         return None
-
 def calculate_market_structure(df: pd.DataFrame) -> Dict:
     """Analiza la estructura del mercado (HH, HL, LL, LH)."""
     highs = df['high'].values
@@ -183,12 +168,12 @@ def detect_chart_patterns(df: pd.DataFrame) -> List[Dict]:
         try:
             result = pattern_func(df['open'], df['high'], df['low'], df['close'])
             last_signal_index = result[result != 0].index.max()
-            if pd.notna(last_signal_index) and (len(df) - last_signal_index) <= 5: # Si el patrón ocurrió en las últimas 5 velas
+            if pd.notna(last_signal_index) and (len(df) - df.index.get_loc(last_signal_index)) <= 5:
                 last_signal = result.loc[last_signal_index]
                 patterns.append({
                     "pattern": pattern_name,
                     "signal": "Bullish" if last_signal > 0 else "Bearish",
-                    "location": f"hace {len(df) - 1 - last_signal_index} velas"
+                    "location": f"hace {len(df) - 1 - df.index.get_loc(last_signal_index)} velas"
                 })
         except:
             pass
@@ -211,8 +196,6 @@ def calculate_support_resistance_zones(df: pd.DataFrame, sensitivity: float = 0.
         if lows[i] == min(lows[i-10:i+10]):
             pivot_levels.append(lows[i])
     
-    # ... (resto de la función sin cambios) ...
-    # (El resto de la lógica de S/R no necesita ser modificada)
     volume_profile = {}
     price_step = max(current_price * 0.001, 0.0001)
     
@@ -306,7 +289,7 @@ def perform_multi_timeframe_analysis(symbol: str, timeframes: Optional[List[str]
     
     if bullish_count > bearish_count and bullish_count >= len(trends) / 2:
         overall_bias = "BULLISH"
-    elif bearish_count > bullish_count and bearish_count >= len(trends) / 2:
+    elif bearish_count > bearish_count and bearish_count >= len(trends) / 2:
         overall_bias = "BEARISH"
     else:
         overall_bias = "NEUTRAL"
@@ -317,6 +300,7 @@ def perform_multi_timeframe_analysis(symbol: str, timeframes: Optional[List[str]
         "alignment": bullish_count == len(trends) or bearish_count == len(trends)
     }
 
+# --- FUNCIÓN CORREGIDA ---
 def advanced_technical_analysis(symbol: str, interval: str = '1h') -> Dict:
     """Análisis técnico completo con todos los indicadores avanzados."""
     
@@ -326,7 +310,7 @@ def advanced_technical_analysis(symbol: str, interval: str = '1h') -> Dict:
         return {"success": False, "message": f"Datos insuficientes para {symbol} en el intervalo {interval} desde todas las fuentes."}
     
     current_price = float(df['close'].iloc[-1])
-    data_source = df['source'].iloc[-1] # Saber de dónde vienen los datos
+    data_source = df['source'].iloc[-1]
     
     market_structure = calculate_market_structure(df)
     sr_zones = calculate_support_resistance_zones(df)
@@ -352,10 +336,11 @@ def advanced_technical_analysis(symbol: str, interval: str = '1h') -> Dict:
             "symbol": symbol, "data_source": data_source, "current_price": current_price, 
             "market_structure": market_structure, "support_resistance": sr_zones, 
             "patterns": patterns, "indicators": indicators, "multi_timeframe": mtf, 
-            "signals": signals, "timestamp": df['timestamp'].iloc[-1].isoformat()
+            "signals": signals, 
+            # --- LÍNEA CORREGIDA: ACCEDER AL ÍNDICE ---
+            "timestamp": df.index[-1].isoformat()
         }
     }
-
 def generate_trading_signals(df: pd.DataFrame, indicators: Dict, 
                            patterns: List, sr_zones: Dict, mtf_analysis: Dict) -> Dict:
     """Genera señales de trading basadas en el análisis completo."""
